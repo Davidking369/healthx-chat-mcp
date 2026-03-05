@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI, FunctionCallingMode } from "@google/generative-ai";
 import dotenv from "dotenv";
 import { initMCP, callMCPTool, getMCPTools } from "./mcpClient.js";
 
@@ -10,12 +10,25 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Initialize Gemini
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 await initMCP();
 
+// Convert MCP tools → Gemini function declarations
+function getGeminiTools() {
+  return [{
+    functionDeclarations: getMCPTools().map((tool: any) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.input_schema
+    }))
+  }];
+}
+
 app.get("/health", (_, res) => res.json({
   status: "ok",
+  provider: "Google Gemini Flash",
   tools: getMCPTools().map((t: any) => t.name)
 }));
 
@@ -29,68 +42,93 @@ app.post("/chat", async (req, res) => {
   const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   try {
-    let currentMessages = [...messages];
+    // Convert messages to Gemini format
+    // Gemini uses "user"/"model" roles (not "assistant")
+    const geminiHistory = messages.slice(0, -1).map((m: any) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }]
+    }));
+
+    const lastMessage = messages[messages.length - 1].content;
+
+    // Initialize model with MCP tools
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash",
+      systemInstruction: `You are HealthX AI, a helpful assistant with access to a MySQL database.
+        Use the available tools to answer questions accurately.
+        Always explain what you're doing when querying the database.`,
+      tools: getMCPTools().length > 0 ? getGeminiTools() : undefined,
+      toolConfig: {
+        functionCallingConfig: { mode: FunctionCallingMode.AUTO }
+      }
+    });
+
+    // Start chat with history
+    const chat = model.startChat({ history: geminiHistory });
+
+    // Agentic loop — handles tool calls
+    let userInput = lastMessage;
 
     while (true) {
-      const stream = await anthropic.messages.stream({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 4096,
-        system: `You are HealthX AI, a helpful assistant with access to a MySQL database.
-                 Use tools to answer questions accurately. Explain what you're doing.`,
-        tools: getMCPTools(),
-        messages: currentMessages
-      });
+      const result = await chat.sendMessageStream(userInput);
 
-      let toolUses: any[] = [];
+      let fullText = "";
+      let functionCalls: any[] = [];
 
-      for await (const chunk of stream) {
-        if (chunk.type === "content_block_delta") {
-          if (chunk.delta.type === "text_delta") {
-            send({ type: "text", content: chunk.delta.text });
-          }
+      // Stream text chunks to frontend
+      for await (const chunk of result.stream) {
+        const text = chunk.text();
+        if (text) {
+          fullText += text;
+          send({ type: "text", content: text });
         }
-        if (chunk.type === "content_block_start" &&
-            chunk.content_block.type === "tool_use") {
-          send({ type: "tool_start", tool: chunk.content_block.name });
+
+        // Detect function calls
+        const calls = chunk.functionCalls();
+        if (calls && calls.length > 0) {
+          functionCalls.push(...calls);
         }
       }
 
-      const finalMessage = await stream.finalMessage();
+      const response = await result.response;
+      const allFunctionCalls = response.functionCalls();
 
-      if (finalMessage.stop_reason !== "tool_use") {
+      // No tool calls — done
+      if (!allFunctionCalls || allFunctionCalls.length === 0) {
         send({ type: "done" });
         break;
       }
 
-      const toolResults = [];
-      for (const block of finalMessage.content) {
-        if (block.type === "tool_use") {
-          try {
-            send({ type: "tool_running", tool: block.name, input: block.input });
-            const result = await callMCPTool(block.name, block.input);
-            send({ type: "tool_result", tool: block.name, result });
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: block.id,
-              content: JSON.stringify(result)
-            });
-          } catch (err: any) {
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: block.id,
-              content: `Error: ${err.message}`,
-              is_error: true
-            });
-          }
+      // Execute each tool call via MCP
+      const functionResponses = [];
+      for (const call of allFunctionCalls) {
+        try {
+          send({ type: "tool_start", tool: call.name });
+          send({ type: "tool_running", tool: call.name, input: call.args });
+
+          const result = await callMCPTool(call.name, call.args);
+          send({ type: "tool_result", tool: call.name, result });
+
+          functionResponses.push({
+            functionResponse: {
+              name: call.name,
+              response: { result: JSON.stringify(result) }
+            }
+          });
+        } catch (err: any) {
+          functionResponses.push({
+            functionResponse: {
+              name: call.name,
+              response: { error: err.message }
+            }
+          });
         }
       }
 
-      currentMessages = [
-        ...currentMessages,
-        { role: "assistant", content: finalMessage.content },
-        { role: "user", content: toolResults }
-      ];
+      // Feed tool results back — continue loop
+      userInput = functionResponses as any;
     }
+
   } catch (err: any) {
     send({ type: "error", message: err.message });
     res.end();
@@ -99,4 +137,5 @@ app.post("/chat", async (req, res) => {
 
 app.listen(process.env.PORT || 3001, () => {
   console.log(`🚀 HealthX backend running on port ${process.env.PORT || 3001}`);
+  console.log(`🤖 Provider: Google Gemini 1.5 Flash (Free)`);
 });
