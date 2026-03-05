@@ -122,6 +122,52 @@ async function runTool(name: string, args: any, pool: mysql.Pool): Promise<strin
   }
 }
 
+// ── Schema Endpoint (for ER Diagram) ──────────────────
+app.post("/schema", async (req, res) => {
+  const { db } = req.body;
+  try {
+    const pool = getPool(db);
+    const dbName = db?.database || process.env.MYSQL_DATABASE || "healthx_db";
+
+    // Get all columns with types, nullability, key info
+    const [columns] = await pool.execute(`
+      SELECT
+        TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE,
+        COLUMN_KEY, EXTRA, COLUMN_DEFAULT, ORDINAL_POSITION
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ?
+      ORDER BY TABLE_NAME, ORDINAL_POSITION
+    `, [dbName]) as any[];
+
+    // Get row counts per table
+    const [tables] = await pool.execute(`
+      SELECT TABLE_NAME, TABLE_ROWS, TABLE_COMMENT
+      FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+    `, [dbName]) as any[];
+
+    // Get FK relationships
+    const [fks] = await pool.execute(`
+      SELECT
+        kcu.TABLE_NAME,
+        kcu.COLUMN_NAME,
+        kcu.REFERENCED_TABLE_NAME,
+        kcu.REFERENCED_COLUMN_NAME,
+        kcu.CONSTRAINT_NAME
+      FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+        ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+        AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+      WHERE kcu.TABLE_SCHEMA = ?
+        AND tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
+    `, [dbName]) as any[];
+
+    res.json({ columns, tables, relationships: fks });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // ── Test DB Connection ─────────────────────────────────
 app.post("/test-db", async (req, res) => {
   const { db } = req.body;
