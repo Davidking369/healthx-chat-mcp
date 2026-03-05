@@ -40,7 +40,7 @@
 
 <div class="header">
   <div class="logo">✦ HealthX AI</div>
-  <div class="status"><div class="dot"></div> Gemini 1.5 Flash</div>
+  <div class="status"><div class="dot"></div> Groq llama-3.3-70b</div>
 </div>
 
 <div class="chat-window" id="chatWindow">
@@ -159,10 +159,18 @@
             if (data.type === 'tool_start') addToolStatus(`🔧 Calling: ${data.tool}...`);
             if (data.type === 'tool_running') addToolStatus(`⚙️ Running: ${data.tool}`);
             if (data.type === 'tool_result') clearToolStatus();
-            if (data.type === 'done') { clearToolStatus(); }
+            if (data.type === 'done') {
+              clearToolStatus();
+              isLoading = false;
+              sendBtn.disabled = false;
+              input.focus();
+            }
             if (data.type === 'error') {
               clearToolStatus();
               assistantContent.textContent = `❌ Error: ${data.message}`;
+              isLoading = false;
+              sendBtn.disabled = false;
+              input.focus();
             }
           } catch(e) {}
         }

@@ -179,7 +179,8 @@ Always explain what you found in a clear, friendly way.`
 
         if (chunk.choices[0]?.finish_reason === "stop") {
           send({ type: "done" });
-          break;
+          res.end();
+          return;
         }
 
         if (chunk.choices[0]?.finish_reason === "tool_calls") break;
@@ -188,6 +189,7 @@ Always explain what you found in a clear, friendly way.`
       // No tool calls — done
       if (toolCalls.length === 0) {
         send({ type: "done" });
+        res.end();
         break;
       }
 
