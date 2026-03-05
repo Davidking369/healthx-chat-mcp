@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+
+  backend:
+    build: ./backend
+    container_name: healthx-mcp-backend
+    ports:
+      - "3001:3001"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - PORT=3001
+    depends_on:
+      - mysql
+    restart: unless-stopped
+    networks:
+      - healthx-network
+
+  frontend:
+    build: ./frontend
+    container_name: healthx-chat-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - healthx-network
+
+  mysql:
+    image: mysql:8.0
+    container_name: healthx-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - healthx-network
+
+networks:
+  healthx-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
