@@ -5,6 +5,12 @@ import mysql from "mysql2/promise";
 import dotenv from "dotenv";
 import { z } from "zod";
 
+// ── MCP SDK (installed, available via subpaths when needed) ────────────────
+// import { Server }    from "@modelcontextprotocol/sdk/server/index.js";
+// import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+// Note: root import `from "@modelcontextprotocol/sdk"` is broken in CJS (no dist/cjs/index.js).
+// Use subpath imports above when wiring up MCP server.
+
 dotenv.config();
 
 const app = express();

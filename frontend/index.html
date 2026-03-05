@@ -931,24 +931,14 @@ function clearToolStatus() {
 function openErDiagram() {
   const modal = document.getElementById('erModal');
   const frame = document.getElementById('erFrame');
+  const db    = databases[activeDbIndex];
 
-  // Pass active DB config + backend URL into the iframe via URL params
-  // The ER diagram page reads window.BACKEND_URL and window.DB_CONFIG injected via postMessage
-  const db = databases[activeDbIndex];
-  const erUrl = '/er-diagram.html';
-  frame.src = erUrl;
-
-  // Once iframe loads, inject config
-  frame.onload = () => {
-    try {
-      frame.contentWindow.BACKEND_URL = BACKEND;
-      frame.contentWindow.DB_CONFIG   = db;
-      // Trigger schema load
-      frame.contentWindow.loadSchema();
-    } catch(e) {
-      // cross-origin fallback: pass via query string encoded
-    }
-  };
+  // Pass config via URL query params — avoids same-origin injection race condition
+  const params = new URLSearchParams({
+    backend: BACKEND,
+    db:      JSON.stringify(db),
+  });
+  frame.src = `/er-diagram.html?${params.toString()}`;
   modal.style.display = 'flex';
   document.body.style.overflow = 'hidden';
 }
@@ -957,7 +947,6 @@ function closeErDiagram() {
   document.getElementById('erFrame').src = '';
   document.body.style.overflow = '';
 }
-// Close on backdrop click
 document.getElementById('erModal')?.addEventListener('click', function(e) {
   if (e.target === this) closeErDiagram();
 });

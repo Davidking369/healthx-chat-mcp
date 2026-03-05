@@ -99,8 +99,9 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
   <div class="lr"><div class="ll" style="background:rgba(96,165,250,0.45)"></div>Relationship</div>
 </div>
 <script>
-const BACKEND = window.BACKEND_URL || 'http://localhost:3001';
-const DB_CONFIG = window.DB_CONFIG || null;
+const _params = new URLSearchParams(window.location.search);
+const BACKEND   = _params.get('backend') || 'http://localhost:3001';
+const DB_CONFIG = _params.get('db') ? JSON.parse(_params.get('db')) : null;
 let tables={}, rels=[], tf={x:60,y:60,scale:1};
 let panning=false, panStart={x:0,y:0}, panOrigin={x:0,y:0};
 let dragging=null, dragOff={x:0,y:0}, selTable=null, showLabels=true;

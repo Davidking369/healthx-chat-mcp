@@ -2,6 +2,9 @@ import { useState, useRef, useEffect } from "react";
 import Message from "./components/Message";
 import "./App.css";
 
+// Works with vite proxy ("/chat") in dev, or direct URL in production
+const BACKEND = import.meta.env.VITE_BACKEND_URL ?? "";
+
 type Msg = { role: "user" | "assistant"; content: string; toolCalls?: any[] };
 
 export default function App() {
@@ -26,7 +29,7 @@ export default function App() {
     setMessages(prev => [...prev, { role: "assistant", content: "", toolCalls: [] }]);
 
     try {
-      const response = await fetch("/chat", {
+      const response = await fetch(`${BACKEND}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: history.map(m => ({ role: m.role, content: m.content })) })
