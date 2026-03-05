@@ -101,6 +101,17 @@ async function runTool(name: string, args: any): Promise<string> {
   }
 }
 
+// ── Direct Tool Endpoint (for alerts) ─────────────────
+app.post("/tool", async (req, res) => {
+  const { tool, args } = req.body;
+  try {
+    const result = await runTool(tool, args);
+    res.json({ result });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // ── Health Check ───────────────────────────────────────
 app.get("/health", async (_, res) => {
   try {
