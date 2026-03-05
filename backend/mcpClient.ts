@@ -8,7 +8,7 @@ export async function initMCP() {
   try {
     const transport = new StdioClientTransport({
       command: "npx",
-      args: ["ts-node", "./mysqlMcp.ts"],
+      args: ["tsx", "./mysqlMcp.ts"],
       env: {
         ...process.env,
         MYSQL_HOST: process.env.MYSQL_HOST!,
@@ -18,14 +18,15 @@ export async function initMCP() {
       }
     });
 
-    mcpClient = new Client({ name: "healthx-chat", version: "1.0.0" }, {
-      capabilities: { tools: {} }
-    });
+    mcpClient = new Client(
+      { name: "healthx-chat", version: "1.0.0" },
+      { capabilities: { tools: {} } }
+    );
 
     await mcpClient.connect(transport);
 
     const { tools } = await mcpClient.listTools();
-    mcpTools = tools.map(tool => ({
+    mcpTools = tools.map((tool: any) => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.inputSchema
@@ -36,6 +37,7 @@ export async function initMCP() {
     console.error("❌ MCP connection failed:", err);
   }
 }
+
 export async function callMCPTool(name: string, input: any) {
   if (!mcpClient) throw new Error("MCP not connected");
   const result = await mcpClient.callTool({ name, arguments: input });

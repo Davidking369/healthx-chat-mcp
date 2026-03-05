@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HealthX AI Chat</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f0f0f; color: #e8e8e8; height: 100vh; display: flex; flex-direction: column; }
+    .header { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; border-bottom: 1px solid #222; }
+    .logo { font-size: 18px; font-weight: 600; color: #e8a87c; }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #888; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; }
+    .chat-window { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; max-width: 800px; width: 100%; margin: 0 auto; }
+    .empty-state { margin: auto; text-align: center; }
+    .empty-state h2 { font-size: 28px; color: #e8a87c; margin-bottom: 24px; }
+    .suggestions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+    .suggestion { padding: 10px 16px; background: #1a1a1a; border: 1px solid #333; border-radius: 20px; color: #ccc; cursor: pointer; font-size: 14px; transition: all 0.2s; }
+    .suggestion:hover { border-color: #e8a87c; color: #e8a87c; }
+    .message { display: flex; gap: 14px; max-width: 800px; width: 100%; margin: 0 auto; }
+    .message.user { flex-direction: row-reverse; }
+    .avatar { width: 36px; height: 36px; border-radius: 50%; background: #1a1a1a; border: 1px solid #333; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+    .message-body { max-width: 85%; display: flex; flex-direction: column; gap: 8px; }
+    .message.user .message-body { align-items: flex-end; }
+    .content { padding: 12px 16px; border-radius: 12px; font-size: 15px; line-height: 1.6; background: #1a1a1a; border: 1px solid #2a2a2a; white-space: pre-wrap; }
+    .message.user .content { background: #2a1f3d; border-color: #3d2f5a; }
+    .tool-call { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #888; }
+    .tool-call span { color: #e8a87c; }
+    .tool-status { text-align: center; color: #888; font-size: 13px; padding: 8px; animation: pulse 1.5s infinite; max-width: 800px; margin: 0 auto; width: 100%; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    .input-area { border-top: 1px solid #222; padding: 16px 24px; }
+    .input-bar { display: flex; gap: 10px; max-width: 800px; margin: 0 auto; }
+    .input-bar input { flex: 1; padding: 12px 16px; background: #1a1a1a; border: 1px solid #333; border-radius: 24px; color: #e8e8e8; font-size: 15px; outline: none; transition: border-color 0.2s; }
+    .input-bar input:focus { border-color: #e8a87c; }
+    .input-bar button { width: 44px; height: 44px; background: #e8a87c; border: none; border-radius: 50%; font-size: 18px; cursor: pointer; transition: opacity 0.2s; }
+    .input-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">✦ HealthX AI</div>
+  <div class="status"><div class="dot"></div> Gemini 1.5 Flash</div>
+</div>
+
+<div class="chat-window" id="chatWindow">
+  <div class="empty-state" id="emptyState">
+    <h2>✦ How can I help you?</h2>
+    <div class="suggestions">
+      <button class="suggestion" onclick="setInput('Show all tables')">Show all tables</button>
+      <button class="suggestion" onclick="setInput('How many users are there?')">How many users?</button>
+      <button class="suggestion" onclick="setInput('List all orders')">List all orders</button>
+      <button class="suggestion" onclick="setInput('Describe the users table')">Describe users table</button>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <div class="input-bar">
+    <input type="text" id="messageInput" placeholder="Ask anything about your database..." onkeydown="handleKey(event)" />
+    <button id="sendBtn" onclick="sendMessage()">↑</button>
+  </div>
+</div>
+
+<script>
+  const chatWindow = document.getElementById('chatWindow');
+  const input = document.getElementById('messageInput');
+  const sendBtn = document.getElementById('sendBtn');
+  const emptyState = document.getElementById('emptyState');
+  let isLoading = false;
+
+  function setInput(text) {
+    input.value = text;
+    input.focus();
+  }
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) sendMessage();
+  }
+
+  function addMessage(role, content) {
+    if (emptyState) emptyState.style.display = 'none';
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    div.innerHTML = `
+      <div class="avatar">${role === 'user' ? '👤' : '✦'}</div>
+      <div class="message-body">
+        <div class="content" id="msg-${Date.now()}">${content}</div>
+      </div>`;
+    chatWindow.appendChild(div);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    return div.querySelector('.content');
+  }
+
+  function addToolStatus(text) {
+    let el = document.getElementById('toolStatus');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'toolStatus';
+      el.className = 'tool-status';
+      chatWindow.appendChild(el);
+    }
+    el.textContent = text;
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+  }
+
+  function clearToolStatus() {
+    const el = document.getElementById('toolStatus');
+    if (el) el.remove();
+  }
+
+  async function sendMessage() {
+    const text = input.value.trim();
+    if (!text || isLoading) return;
+
+    input.value = '';
+    isLoading = true;
+    sendBtn.disabled = true;
+
+    addMessage('user', text);
+    const assistantContent = addMessage('assistant', '');
+
+    // Collect chat history
+    const messages = [];
+    document.querySelectorAll('.message').forEach(m => {
+      const role = m.classList.contains('user') ? 'user' : 'assistant';
+      const content = m.querySelector('.content')?.textContent || '';
+      if (content) messages.push({ role, content });
+    });
+
+    try {
+      const response = await fetch('http://localhost:3001/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages })
+      });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value);
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+
+            if (data.type === 'text') {
+              assistantContent.textContent += data.content;
+              chatWindow.scrollTop = chatWindow.scrollHeight;
+            }
+            if (data.type === 'tool_start') addToolStatus(`🔧 Calling: ${data.tool}...`);
+            if (data.type === 'tool_running') addToolStatus(`⚙️ Running: ${data.tool}`);
+            if (data.type === 'tool_result') clearToolStatus();
+            if (data.type === 'done') { clearToolStatus(); }
+            if (data.type === 'error') {
+              clearToolStatus();
+              assistantContent.textContent = `❌ Error: ${data.message}`;
+            }
+          } catch(e) {}
+        }
+      }
+    } catch (err) {
+      assistantContent.textContent = `❌ Connection error: ${err.message}`;
+    }
+
+    isLoading = false;
+    sendBtn.disabled = false;
+    input.focus();
+  }
+</script>
+</body>
+</html>
