@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { GoogleGenerativeAI, FunctionCallingMode, FunctionDeclarationSchemaType } from "@google/generative-ai";
+import Groq from "groq-sdk";
 import mysql from "mysql2/promise";
 import dotenv from "dotenv";
 
@@ -10,8 +10,10 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+// ── Groq Client ────────────────────────────────────────
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+// ── MySQL Pool ─────────────────────────────────────────
 const pool = mysql.createPool({
   host:     process.env.MYSQL_HOST || "127.0.0.1",
   port:     Number(process.env.MYSQL_PORT) || 3306,
@@ -22,45 +24,60 @@ const pool = mysql.createPool({
   connectionLimit: 10
 });
 
-const tools = [
+// ── Tools Definition ───────────────────────────────────
+const tools: any[] = [
   {
-    name: "query",
-    description: "Run a SELECT query on the MySQL database",
-    parameters: {
-      type: FunctionDeclarationSchemaType.OBJECT,
-      properties: { sql: { type: FunctionDeclarationSchemaType.STRING, description: "SELECT SQL query" } },
-      required: ["sql"]
+    type: "function",
+    function: {
+      name: "query",
+      description: "Run a read-only SELECT query on the MySQL database",
+      parameters: {
+        type: "object",
+        properties: { sql: { type: "string", description: "SELECT SQL query" } },
+        required: ["sql"]
+      }
     }
   },
   {
-    name: "list_tables",
-    description: "List all tables in the database",
-    parameters: { type: FunctionDeclarationSchemaType.OBJECT, properties: {} }
-  },
-  {
-    name: "describe_table",
-    description: "Get columns and schema of a table",
-    parameters: {
-      type: FunctionDeclarationSchemaType.OBJECT,
-      properties: { table: { type: FunctionDeclarationSchemaType.STRING, description: "Table name" } },
-      required: ["table"]
+    type: "function",
+    function: {
+      name: "list_tables",
+      description: "List all tables in the database",
+      parameters: { type: "object", properties: {} }
     }
   },
   {
-    name: "execute",
-    description: "Run INSERT, UPDATE or DELETE SQL",
-    parameters: {
-      type: FunctionDeclarationSchemaType.OBJECT,
-      properties: { sql: { type: FunctionDeclarationSchemaType.STRING, description: "SQL statement" } },
-      required: ["sql"]
+    type: "function",
+    function: {
+      name: "describe_table",
+      description: "Get columns and schema of a specific table",
+      parameters: {
+        type: "object",
+        properties: { table: { type: "string", description: "Table name" } },
+        required: ["table"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "execute",
+      description: "Run INSERT, UPDATE or DELETE SQL statement",
+      parameters: {
+        type: "object",
+        properties: { sql: { type: "string", description: "SQL statement" } },
+        required: ["sql"]
+      }
     }
   }
 ];
 
+// ── Tool Executor ──────────────────────────────────────
 async function runTool(name: string, args: any): Promise<string> {
   switch (name) {
     case "query": {
-      if (!args.sql.trim().toUpperCase().startsWith("SELECT")) throw new Error("Only SELECT allowed");
+      if (!args.sql.trim().toUpperCase().startsWith("SELECT"))
+        throw new Error("Only SELECT queries allowed");
       const [rows] = await pool.execute(args.sql);
       return JSON.stringify(rows, null, 2);
     }
@@ -74,81 +91,143 @@ async function runTool(name: string, args: any): Promise<string> {
     }
     case "execute": {
       const upper = args.sql.trim().toUpperCase();
-      if (upper.startsWith("DROP") || upper.startsWith("TRUNCATE")) throw new Error("Blocked");
+      if (upper.startsWith("DROP") || upper.startsWith("TRUNCATE"))
+        throw new Error("DROP/TRUNCATE blocked for safety");
       const [result] = await pool.execute(args.sql);
       return JSON.stringify(result, null, 2);
     }
-    default: throw new Error(`Unknown tool: ${name}`);
+    default:
+      throw new Error(`Unknown tool: ${name}`);
   }
 }
 
+// ── Health Check ───────────────────────────────────────
 app.get("/health", async (_, res) => {
   try {
     await pool.execute("SELECT 1");
-    res.json({ status: "ok", db: "connected", provider: "Gemini 1.5 Flash" });
+    res.json({ status: "ok", db: "connected", provider: "Groq llama3-70b" });
   } catch (e: any) {
-    res.json({ status: "ok", db: "error: " + e.message });
+    res.json({ status: "ok", db: "error: " + e.message, provider: "Groq llama3-70b" });
   }
 });
 
+// ── Chat Endpoint ──────────────────────────────────────
 app.post("/chat", async (req, res) => {
   const { messages } = req.body;
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+
   const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   try {
-    const geminiHistory = messages.slice(0, -1).map((m: any) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }]
-    }));
-    const lastMessage = messages[messages.length - 1].content;
+    const systemMessage = {
+      role: "system" as const,
+      content: `You are HealthX AI, a helpful assistant with access to a MySQL database.
+Use the available tools to answer questions accurately.
+Always explain what you found in a clear, friendly way.`
+    };
 
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.0-flash",
-      systemInstruction: "You are HealthX AI, a helpful assistant with MySQL database access. Use tools to answer questions accurately.",
-      tools: [{ functionDeclarations: tools }],
-      toolConfig: { functionCallingConfig: { mode: FunctionCallingMode.AUTO } }
-    });
+    let currentMessages: any[] = [
+      systemMessage,
+      ...messages.map((m: any) => ({ role: m.role, content: m.content }))
+    ];
 
-    const chat = model.startChat({ history: geminiHistory });
-    let userInput: any = lastMessage;
-
+    // Agentic loop
     while (true) {
-      const result = await chat.sendMessageStream(userInput);
+      const stream = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        messages: currentMessages,
+        tools,
+        tool_choice: "auto",
+        stream: true,
+        max_tokens: 4096
+      });
 
-      for await (const chunk of result.stream) {
-        const text = chunk.text();
-        if (text) send({ type: "text", content: text });
+      let fullText = "";
+      let toolCalls: any[] = [];
+      let currentToolCall: any = null;
+
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta;
+
+        // Stream text
+        if (delta?.content) {
+          fullText += delta.content;
+          send({ type: "text", content: delta.content });
+        }
+
+        // Accumulate tool calls
+        if (delta?.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            if (tc.index !== undefined) {
+              if (!toolCalls[tc.index]) {
+                toolCalls[tc.index] = { id: "", type: "function", function: { name: "", arguments: "" } };
+              }
+              if (tc.id) toolCalls[tc.index].id = tc.id;
+              if (tc.function?.name) {
+                toolCalls[tc.index].function.name = tc.function.name;
+                send({ type: "tool_start", tool: tc.function.name });
+              }
+              if (tc.function?.arguments) {
+                toolCalls[tc.index].function.arguments += tc.function.arguments;
+              }
+            }
+          }
+        }
+
+        if (chunk.choices[0]?.finish_reason === "stop") {
+          send({ type: "done" });
+          break;
+        }
+
+        if (chunk.choices[0]?.finish_reason === "tool_calls") break;
       }
 
-      const response = await result.response;
-      const calls = response.functionCalls();
+      // No tool calls — done
+      if (toolCalls.length === 0) {
+        send({ type: "done" });
+        break;
+      }
 
-      if (!calls || calls.length === 0) { send({ type: "done" }); break; }
+      // Add assistant message with tool calls
+      currentMessages.push({
+        role: "assistant",
+        content: fullText || null,
+        tool_calls: toolCalls
+      });
 
-      const functionResponses = [];
-      for (const call of calls) {
+      // Execute each tool
+      for (const tc of toolCalls) {
         try {
-          send({ type: "tool_start", tool: call.name });
-          send({ type: "tool_running", tool: call.name, input: call.args });
-          const toolResult = await runTool(call.name, call.args);
-          send({ type: "tool_result", tool: call.name, result: toolResult });
-          functionResponses.push({ functionResponse: { name: call.name, response: { result: toolResult } } });
+          const args = JSON.parse(tc.function.arguments || "{}");
+          send({ type: "tool_running", tool: tc.function.name, input: args });
+          const result = await runTool(tc.function.name, args);
+          send({ type: "tool_result", tool: tc.function.name, result });
+          currentMessages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: result
+          });
         } catch (err: any) {
-          functionResponses.push({ functionResponse: { name: call.name, response: { error: err.message } } });
+          currentMessages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: `Error: ${err.message}`
+          });
         }
       }
-      userInput = functionResponses;
     }
+
   } catch (err: any) {
     send({ type: "error", message: err.message });
     res.end();
   }
 });
 
+// ── Start ──────────────────────────────────────────────
 app.listen(process.env.PORT || 3001, () => {
   console.log("🚀 HealthX backend → http://localhost:3001");
-  console.log("🤖 Provider: Google Gemini 1.5 Flash (Free)");
+  console.log("🤖 Provider: Groq llama3-70b (Free)");
 });
