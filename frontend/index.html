@@ -50,10 +50,21 @@
     /* ── DB Selector ── */
     .db-bar { display: flex; align-items: center; gap: 8px; padding: 8px 20px; border-bottom: 1px solid var(--border); background: var(--bg3); flex-shrink: 0; overflow-x: auto; }
     .db-label { font-size: 12px; color: var(--text3); white-space: nowrap; }
-    .db-chip { padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border2); background: var(--bg2); color: var(--text2); font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .db-chip { display: flex; align-items: center; gap: 5px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border2); background: var(--bg2); color: var(--text2); font-size: 12px; cursor: pointer; white-space: nowrap; transition: all 0.15s; }
     .db-chip.active { border-color: var(--accent); color: var(--accent); background: var(--accent2); }
+    .db-chip:hover:not(.active) { border-color: var(--text3); }
+    .db-status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .db-status-dot.connected { background: #4caf50; box-shadow: 0 0 5px #4caf50; }
+    .db-status-dot.error { background: #e05555; box-shadow: 0 0 5px #e05555; }
+    .db-status-dot.pending { background: var(--text3); animation: pulse 1.5s infinite; }
+    .db-chip-del { margin-left: 2px; opacity: 0; font-size: 10px; }
+    .db-chip:hover .db-chip-del { opacity: 0.6; }
     .db-add { padding: 4px 10px; border-radius: 20px; border: 1px dashed var(--border2); background: transparent; color: var(--text3); font-size: 12px; cursor: pointer; }
     .db-add:hover { border-color: var(--accent); color: var(--accent); }
+    .db-test-status { font-size: 12px; padding: 6px 10px; border-radius: 6px; text-align: center; }
+    .db-test-status.ok { background: rgba(76,175,80,0.1); color: #4caf50; border: 1px solid rgba(76,175,80,0.3); }
+    .db-test-status.fail { background: rgba(224,85,85,0.1); color: #e05555; border: 1px solid rgba(224,85,85,0.3); }
+    .db-test-status.testing { background: var(--bg3); color: var(--text3); border: 1px solid var(--border2); }
 
     /* ── Main ── */
     .main { display: flex; flex: 1; overflow: hidden; }
@@ -181,14 +192,16 @@
   <div class="modal">
     <h3>➕ Add Database</h3>
     <input id="dbName" placeholder="Name (e.g. Production)" />
-    <input id="dbHost" placeholder="Host" />
-    <input id="dbPort" placeholder="Port (3306)" />
-    <input id="dbUser" placeholder="User" />
+    <input id="dbHost" placeholder="Host (e.g. 127.0.0.1)" />
+    <input id="dbPort" placeholder="Port (default: 3306)" type="number" />
+    <input id="dbUser" placeholder="Username" />
     <input id="dbPass" placeholder="Password" type="password" />
     <input id="dbDatabase" placeholder="Database name" />
+    <div id="dbTestStatus" style="display:none" class="db-test-status"></div>
     <div class="modal-btns">
       <button class="modal-btn cancel" onclick="closeDbModal()">Cancel</button>
-      <button class="modal-btn primary" onclick="saveDb()">Add</button>
+      <button class="modal-btn cancel" onclick="testDbConnection()" id="testBtn">🔌 Test</button>
+      <button class="modal-btn primary" onclick="saveDb()" id="saveDbBtn" disabled style="opacity:0.4">Save</button>
     </div>
   </div>
 </div>
@@ -356,27 +369,126 @@ function applyTheme() {
 }
 
 // ── DB Management ──────────────────────────────────────
+const dbStatus = {}; // index → 'connected' | 'error' | 'pending'
+
 function renderDbChips() {
   const c = document.getElementById('dbChips');
-  c.innerHTML = databases.map((db, i) =>
-    `<div class="db-chip ${i===activeDbIndex?'active':''}" onclick="switchDb(${i})">${db.name}</div>`
-  ).join('');
+  c.innerHTML = databases.map((db, i) => {
+    const status = dbStatus[i] || 'pending';
+    return `<div class="db-chip ${i===activeDbIndex?'active':''}" onclick="switchDb(${i})">
+      <div class="db-status-dot ${status}"></div>
+      ${db.name}
+      ${i > 0 ? `<span class="db-chip-del" onclick="removeDb(event,${i})">✕</span>` : ''}
+    </div>`;
+  }).join('');
 }
-function switchDb(i) { activeDbIndex = i; renderDbChips(); notify(`Switched to ${databases[i].name}`); }
-function openDbModal() { document.getElementById('dbModal').style.display='flex'; }
+
+async function switchDb(i) {
+  activeDbIndex = i;
+  renderDbChips();
+  // Verify connection on switch
+  const db = databases[i];
+  try {
+    const res = await fetch(`${BACKEND}/test-db`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ db })
+    });
+    const data = await res.json();
+    if (data.status === 'connected') {
+      dbStatus[i] = 'connected';
+      notify(`✅ Connected to ${db.name}`);
+    } else {
+      dbStatus[i] = 'error';
+      notify(`❌ ${db.name}: ${data.message}`);
+    }
+  } catch(e) {
+    dbStatus[i] = 'error';
+    notify(`❌ Cannot reach backend`);
+  }
+  renderDbChips();
+}
+
+function removeDb(e, i) {
+  e.stopPropagation();
+  if (!confirm(`Remove "${databases[i].name}"?`)) return;
+  databases.splice(i, 1);
+  delete dbStatus[i];
+  if (activeDbIndex >= databases.length) activeDbIndex = 0;
+  saveState(); renderDbChips();
+}
+
+function openDbModal() {
+  document.getElementById('dbModal').style.display='flex';
+  document.getElementById('dbTestStatus').style.display='none';
+  document.getElementById('saveDbBtn').disabled = true;
+  document.getElementById('saveDbBtn').style.opacity = '0.4';
+  ['dbName','dbHost','dbPort','dbUser','dbPass','dbDatabase'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+}
 function closeDbModal() { document.getElementById('dbModal').style.display='none'; }
-function saveDb() {
-  const name = document.getElementById('dbName').value.trim();
+
+async function testDbConnection() {
   const host = document.getElementById('dbHost').value.trim();
-  if (!name || !host) return;
-  databases.push({ name, host,
-    port: parseInt(document.getElementById('dbPort').value)||3306,
+  if (!host) { notify('Enter a host first'); return; }
+
+  const db = {
+    host,
+    port: parseInt(document.getElementById('dbPort').value) || 3306,
     user: document.getElementById('dbUser').value,
     pass: document.getElementById('dbPass').value,
     database: document.getElementById('dbDatabase').value
-  });
+  };
+
+  const statusEl = document.getElementById('dbTestStatus');
+  const testBtn = document.getElementById('testBtn');
+  statusEl.style.display = 'block';
+  statusEl.className = 'db-test-status testing';
+  statusEl.textContent = '⏳ Testing connection...';
+  testBtn.disabled = true;
+
+  try {
+    const res = await fetch(`${BACKEND}/test-db`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ db })
+    });
+    const data = await res.json();
+    if (data.status === 'connected') {
+      statusEl.className = 'db-test-status ok';
+      statusEl.textContent = `✅ ${data.message}`;
+      document.getElementById('saveDbBtn').disabled = false;
+      document.getElementById('saveDbBtn').style.opacity = '1';
+    } else {
+      statusEl.className = 'db-test-status fail';
+      statusEl.textContent = `❌ ${data.message}`;
+    }
+  } catch(e) {
+    statusEl.className = 'db-test-status fail';
+    statusEl.textContent = `❌ Cannot reach backend: ${e.message}`;
+  }
+  testBtn.disabled = false;
+}
+
+async function saveDb() {
+  const name = document.getElementById('dbName').value.trim();
+  const host = document.getElementById('dbHost').value.trim();
+  if (!name || !host) { notify('Name and host are required'); return; }
+
+  const db = {
+    name, host,
+    port: parseInt(document.getElementById('dbPort').value) || 3306,
+    user: document.getElementById('dbUser').value,
+    pass: document.getElementById('dbPass').value,
+    database: document.getElementById('dbDatabase').value
+  };
+
+  databases.push(db);
+  const newIndex = databases.length - 1;
+  dbStatus[newIndex] = 'connected'; // already tested
+  activeDbIndex = newIndex;         // auto-switch to new DB
+
   saveState(); renderDbChips(); closeDbModal();
-  notify(`Database "${name}" added`);
+  notify(`🗄️ Switched to "${name}"`);
 }
 
 // ── Chat History ───────────────────────────────────────

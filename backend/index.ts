@@ -10,21 +10,42 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// ── Groq Client ────────────────────────────────────────
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// ── MySQL Pool ─────────────────────────────────────────
-const pool = mysql.createPool({
-  host:     process.env.MYSQL_HOST || "127.0.0.1",
-  port:     Number(process.env.MYSQL_PORT) || 3306,
-  user:     process.env.MYSQL_USER || "healthx_user",
-  password: process.env.MYSQL_PASSWORD || "healthx_pass",
-  database: process.env.MYSQL_DATABASE || "healthx_db",
-  waitForConnections: true,
-  connectionLimit: 10
-});
+// ── Dynamic Pool Cache ─────────────────────────────────
+// One pool per unique DB connection, reused across requests
+const poolCache = new Map<string, mysql.Pool>();
 
-// ── Tools Definition ───────────────────────────────────
+function getPoolKey(db: any): string {
+  return `${db.host}:${db.port}:${db.user}:${db.database}`;
+}
+
+function getPool(db?: any): mysql.Pool {
+  // If no db config sent, fall back to .env defaults
+  const config = {
+    host:     db?.host     || process.env.MYSQL_HOST     || "127.0.0.1",
+    port:     db?.port     || Number(process.env.MYSQL_PORT) || 3306,
+    user:     db?.user     || process.env.MYSQL_USER     || "healthx_user",
+    password: db?.pass     || process.env.MYSQL_PASSWORD || "healthx_pass",
+    database: db?.database || process.env.MYSQL_DATABASE || "healthx_db",
+  };
+
+  const key = getPoolKey(config);
+
+  if (!poolCache.has(key)) {
+    console.log(`🔌 Creating new pool for: ${config.host}:${config.port}/${config.database}`);
+    poolCache.set(key, mysql.createPool({
+      ...config,
+      waitForConnections: true,
+      connectionLimit: 10,
+      connectTimeout: 10000,
+    }));
+  }
+
+  return poolCache.get(key)!;
+}
+
+// ── Tools ──────────────────────────────────────────────
 const tools: any[] = [
   {
     type: "function",
@@ -72,8 +93,8 @@ const tools: any[] = [
   }
 ];
 
-// ── Tool Executor ──────────────────────────────────────
-async function runTool(name: string, args: any): Promise<string> {
+// ── Tool Executor (pool-aware) ─────────────────────────
+async function runTool(name: string, args: any, pool: mysql.Pool): Promise<string> {
   switch (name) {
     case "query": {
       if (!args.sql.trim().toUpperCase().startsWith("SELECT"))
@@ -101,11 +122,24 @@ async function runTool(name: string, args: any): Promise<string> {
   }
 }
 
+// ── Test DB Connection ─────────────────────────────────
+app.post("/test-db", async (req, res) => {
+  const { db } = req.body;
+  try {
+    const pool = getPool(db);
+    await pool.execute("SELECT 1");
+    res.json({ status: "connected", message: `Connected to ${db?.database || "database"}` });
+  } catch (e: any) {
+    res.status(400).json({ status: "error", message: e.message });
+  }
+});
+
 // ── Direct Tool Endpoint (for alerts) ─────────────────
 app.post("/tool", async (req, res) => {
-  const { tool, args } = req.body;
+  const { tool, args, db } = req.body;
   try {
-    const result = await runTool(tool, args);
+    const pool = getPool(db);
+    const result = await runTool(tool, args, pool);
     res.json({ result });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
@@ -113,18 +147,30 @@ app.post("/tool", async (req, res) => {
 });
 
 // ── Health Check ───────────────────────────────────────
-app.get("/health", async (_, res) => {
+app.get("/health", async (req, res) => {
+  const db = req.query.db ? JSON.parse(req.query.db as string) : undefined;
   try {
+    const pool = getPool(db);
     await pool.execute("SELECT 1");
-    res.json({ status: "ok", db: "connected", provider: "Groq llama3-70b" });
+    const config = {
+      host: db?.host || process.env.MYSQL_HOST || "127.0.0.1",
+      database: db?.database || process.env.MYSQL_DATABASE || "healthx_db"
+    };
+    res.json({
+      status: "ok",
+      db: "connected",
+      connection: `${config.host}/${config.database}`,
+      provider: "Groq llama-3.3-70b",
+      activePools: poolCache.size
+    });
   } catch (e: any) {
-    res.json({ status: "ok", db: "error: " + e.message, provider: "Groq llama3-70b" });
+    res.json({ status: "ok", db: "error: " + e.message, provider: "Groq llama-3.3-70b" });
   }
 });
 
 // ── Chat Endpoint ──────────────────────────────────────
 app.post("/chat", async (req, res) => {
-  const { messages } = req.body;
+  const { messages, db } = req.body; // db comes from frontend active DB
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -133,9 +179,19 @@ app.post("/chat", async (req, res) => {
   const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   try {
+    // Get pool for the selected DB
+    const pool = getPool(db);
+
+    // Verify connection before starting
+    await pool.execute("SELECT 1");
+
+    const dbName = db?.database || process.env.MYSQL_DATABASE || "healthx_db";
+    const dbHost = db?.host || process.env.MYSQL_HOST || "127.0.0.1";
+
     const systemMessage = {
       role: "system" as const,
       content: `You are HealthX AI, a helpful assistant with access to a MySQL database.
+Current database: ${dbName} on ${dbHost}.
 Use the available tools to answer questions accurately.
 Always explain what you found in a clear, friendly way.`
     };
@@ -158,18 +214,15 @@ Always explain what you found in a clear, friendly way.`
 
       let fullText = "";
       let toolCalls: any[] = [];
-      let currentToolCall: any = null;
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;
 
-        // Stream text
         if (delta?.content) {
           fullText += delta.content;
           send({ type: "text", content: delta.content });
         }
 
-        // Accumulate tool calls
         if (delta?.tool_calls) {
           for (const tc of delta.tool_calls) {
             if (tc.index !== undefined) {
@@ -197,50 +250,46 @@ Always explain what you found in a clear, friendly way.`
         if (chunk.choices[0]?.finish_reason === "tool_calls") break;
       }
 
-      // No tool calls — done
       if (toolCalls.length === 0) {
         send({ type: "done" });
         res.end();
         break;
       }
 
-      // Add assistant message with tool calls
       currentMessages.push({
         role: "assistant",
         content: fullText || null,
         tool_calls: toolCalls
       });
 
-      // Execute each tool
+      // Execute tools using the selected DB pool
       for (const tc of toolCalls) {
         try {
           const args = JSON.parse(tc.function.arguments || "{}");
           send({ type: "tool_running", tool: tc.function.name, input: args });
-          const result = await runTool(tc.function.name, args);
+          const result = await runTool(tc.function.name, args, pool);
           send({ type: "tool_result", tool: tc.function.name, result });
-          currentMessages.push({
-            role: "tool",
-            tool_call_id: tc.id,
-            content: result
-          });
+          currentMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
         } catch (err: any) {
-          currentMessages.push({
-            role: "tool",
-            tool_call_id: tc.id,
-            content: `Error: ${err.message}`
-          });
+          send({ type: "tool_result", tool: tc.function.name, result: `Error: ${err.message}` });
+          currentMessages.push({ role: "tool", tool_call_id: tc.id, content: `Error: ${err.message}` });
         }
       }
     }
 
   } catch (err: any) {
-    send({ type: "error", message: err.message });
+    // Friendly error if DB connection fails
+    if (err.code === 'ECONNREFUSED' || err.code === 'ER_ACCESS_DENIED_ERROR' || err.code === 'ENOTFOUND') {
+      send({ type: "error", message: `Cannot connect to database: ${err.message}` });
+    } else {
+      send({ type: "error", message: err.message });
+    }
     res.end();
   }
 });
 
-// ── Start ──────────────────────────────────────────────
 app.listen(process.env.PORT || 3001, () => {
   console.log("🚀 HealthX backend → http://localhost:3001");
-  console.log("🤖 Provider: Groq llama3-70b (Free)");
+  console.log("🤖 Provider: Groq llama-3.3-70b (Free)");
+  console.log("🗄️  Dynamic multi-DB support enabled");
 });
