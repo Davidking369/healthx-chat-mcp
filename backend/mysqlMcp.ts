@@ -100,5 +100,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("✅ HealthX MySQL MCP server running");
+}
+
+main().catch((err) => {
+  console.error("Fatal:", err);
+  process.exit(1);
+});
